@@ -1,39 +1,21 @@
+// server.js
 import 'dotenv/config';
 import express from 'express';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-// Routers
-import tgRouter from './tg.js';
-import pricesRouter from './prices.js'; 
+// Arranca el bot de Telegram (long-polling)
+import './tg-polling.js';
 
 const app = express();
-app.disable('x-powered-by');
-app.set('trust proxy', 1);
-app.use(express.json({ limit: '2mb' }));
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+app.get('/', (req, res) => res.send('Bot online'));
+app.get('/healthz', (req, res) => res.status(200).send('ok')); // health check para Render
 
-// Estáticos
-app.use('/image', express.static(path.join(__dirname, 'image')));
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Health & páginas
-app.get('/', (_req, res) => res.send('OK'));
-app.get('/healthz', (_req, res) => res.json({ ok: true }));
-app.get('/privacidad', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'privacidad.html'));
-});
-
-app.use(tgRouter);
-
-app.use(pricesRouter);
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server Telegram escuchando en :${PORT}`);
-  console.log('   • Telegram:   POST /tg/webhook');
-  console.log('   • Health:     GET  /healthz');
-  console.log('   • Imágenes:   /image/*');
-  console.log('   • Privacidad: GET  /privacidad');
+  console.log(`[server] HTTP up on :${PORT}`);
 });
+
+// Cierre limpio (Render envía SIGTERM en deploys)
+const stop = (sig) => () => { console.log(`[server] ${sig}`); process.exit(0); };
+process.on('SIGINT',  stop('SIGINT'));
+process.on('SIGTERM', stop('SIGTERM'));
