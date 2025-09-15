@@ -1,17 +1,17 @@
-// quote.js — generación y envío de cotización en PDF (sin memoria persistente + control de concurrencia)
+// quote.js — generación de PDF y retorno para Telegram (usa WA solo si hay credenciales válidas)
 import fs from 'fs';
 import path from 'path';
 import { buildQuoteFromSession } from './quote-engine.js';
 import { renderQuotePDF } from './quote-pdf.js';
 
 // ===== ENV =====
-const WA_TOKEN       = process.env.WHATSAPP_TOKEN || '';
-const WA_PHONE_ID    = process.env.WHATSAPP_PHONE_ID || '';
-const QUOTES_DIR     = path.resolve('./data/quotes');
-const MAX_CONCURRENCY= parseInt(process.env.QUOTE_MAX_CONCURRENCY || '3', 10); // 2–3 simultáneamente
-const DELETE_AFTER_MS= parseInt(process.env.QUOTE_DELETE_AFTER_MS || (10 * 60 * 1000), 10); // borrar PDF tras 10 min
-const MAX_FILE_AGE_MS= parseInt(process.env.QUOTE_MAX_FILE_AGE_MS || (2 * 60 * 60 * 1000), 10); // limpieza de respaldo: 2h
-const MAX_FILES_KEEP = parseInt(process.env.QUOTE_MAX_FILES_KEEP || '200', 10); // límite suave por si acumula
+const WA_TOKEN        = process.env.WHATSAPP_TOKEN || '';
+const WA_PHONE_ID     = process.env.WHATSAPP_PHONE_ID || '';
+const QUOTES_DIR      = path.resolve('./data/quotes');
+const MAX_CONCURRENCY = parseInt(process.env.QUOTE_MAX_CONCURRENCY || '3', 10);
+const DELETE_AFTER_MS = parseInt(process.env.QUOTE_DELETE_AFTER_MS || (10 * 60 * 1000), 10);
+const MAX_FILE_AGE_MS = parseInt(process.env.QUOTE_MAX_FILE_AGE_MS || (2 * 60 * 60 * 1000), 10);
+const MAX_FILES_KEEP  = parseInt(process.env.QUOTE_MAX_FILES_KEEP || '200', 10);
 
 try { fs.mkdirSync(QUOTES_DIR, { recursive:true }); } catch {}
 
@@ -25,7 +25,7 @@ function cleanName(s = '') {
     .slice(0, 80);
 }
 
-// Concurrencia simple (semáforo en memoria)
+// Concurrencia simple
 let _active = 0;
 const _waiters = [];
 function _acquire() {
@@ -38,7 +38,7 @@ function _release() {
   if (next) { _active++; next(); }
 }
 
-// Limpieza periódica (archivos viejos o exceso de archivos)
+// Limpieza periódica (archivos viejos o exceso)
 function _cleanupOldQuotes() {
   try{
     const files = fs.readdirSync(QUOTES_DIR)
@@ -46,9 +46,9 @@ function _cleanupOldQuotes() {
       .map(f => {
         const p = path.join(QUOTES_DIR, f);
         const st = fs.statSync(p);
-        return { p, f, mtime: st.mtimeMs, birth: st.birthtimeMs, size: st.size };
+        return { p, mtime: st.mtimeMs, birth: st.birthtimeMs };
       })
-      .sort((a,b)=> (a.mtime - b.mtime)); // más antiguos primero
+      .sort((a,b)=> (a.mtime - b.mtime));
 
     const now = Date.now();
     for (const it of files) {
@@ -57,31 +57,19 @@ function _cleanupOldQuotes() {
       }
     }
 
-    // Re-listar tras borrar por edad
     const left = fs.readdirSync(QUOTES_DIR).filter(f => f.toLowerCase().endsWith('.pdf')).sort();
     const overflow = left.length - MAX_FILES_KEEP;
     if (overflow > 0) {
-      // eliminar los más antiguos extra
-      const toDrop = fs.readdirSync(QUOTES_DIR)
-        .filter(f => f.toLowerCase().endsWith('.pdf'))
-        .map(f => {
-          const p = path.join(QUOTES_DIR, f);
-          const st = fs.statSync(p);
-          return { p, mtime: st.mtimeMs };
-        })
-        .sort((a,b)=> (a.mtime - b.mtime))
-        .slice(0, overflow);
-      for (const it of toDrop) { try { fs.unlinkSync(it.p); } catch {} }
+      const toDrop = left.slice(0, overflow);
+      for (const f of toDrop) { try { fs.unlinkSync(path.join(QUOTES_DIR, f)); } catch {} }
     }
-  }catch(e){
-    // silencioso
-  }
+  }catch{}
 }
-setInterval(_cleanupOldQuotes, 30 * 60 * 1000).unref(); // cada 30 min
+setInterval(_cleanupOldQuotes, 30 * 60 * 1000).unref?.();
 
+// ===== WhatsApp helpers =====
 async function waUploadMediaFromFile(filePath, mime='application/pdf'){
   if (!WA_TOKEN || !WA_PHONE_ID) throw new Error('Faltan credenciales de WhatsApp (WHATSAPP_TOKEN / WHATSAPP_PHONE_ID).');
-
   const url = `https://graph.facebook.com/v20.0/${encodeURIComponent(WA_PHONE_ID)}/media`;
   const buf = fs.readFileSync(filePath);
   const blob = new Blob([buf], { type: mime });
@@ -100,10 +88,8 @@ async function waUploadMediaFromFile(filePath, mime='application/pdf'){
   const j = await r.json().catch(()=>null);
   return j?.id || null;
 }
-
 async function waSendDocument(to, mediaId, filename, caption=''){
   if (!WA_TOKEN || !WA_PHONE_ID) throw new Error('Faltan credenciales de WhatsApp (WHATSAPP_TOKEN / WHATSAPP_PHONE_ID).');
-
   const url = `https://graph.facebook.com/v20.0/${encodeURIComponent(WA_PHONE_ID)}/messages`;
   const payload = {
     messaging_product:'whatsapp',
@@ -124,13 +110,8 @@ async function waSendDocument(to, mediaId, filename, caption=''){
 }
 
 /**
- * Genera y envía un PDF de cotización por WhatsApp.
- * - Sin memoria persistente: se programa borrado del archivo y hay limpieza periódica.
- * - Con control de concurrencia: máx. 2–3 procesos simultáneos (configurable).
- *
- * @param {string} to - Número destino (WhatsApp).
- * @param {object} session - Objeto de sesión/estado.
- * @returns {Promise<{ok:boolean, mediaId:string|null, path:string, filename:string, caption:string, quoteId?:string}>}
+ * Genera PDF. Si NO hay creds de WA (o "to" no parece número WA), devuelve la ruta del archivo local.
+ * Si hay creds y número WA válido, lo sube y envía por WhatsApp.
  */
 export async function sendAutoQuotePDF(to, session){
   await _acquire();
@@ -138,40 +119,32 @@ export async function sendAutoQuotePDF(to, session){
     const quote = buildQuoteFromSession(session);
     const clienteName = cleanName(quote?.cliente?.nombre || session?.profileName || 'Cliente');
 
-    // nombre de archivo seguro y (casi) único
-    const stamp = new Date().toISOString().replace(/[:.]/g,'-'); // 2025-09-09T12-34-56-789Z
+    const stamp = new Date().toISOString().replace(/[:.]/g,'-');
     const filename = `${cleanName(`COT - ${clienteName} - ${stamp}`)}.pdf`;
     const filePath = path.join(QUOTES_DIR, filename);
 
-    // Render PDF
     await renderQuotePDF(quote, filePath, {
-      brand: 'New Chem Agroquímicos',
-      tel:   '',
-      dir:   ''
+      brand: process.env.COMPANY_NAME || 'Cotización',
+      logoPath: './public/publicom-logo.png',
+      bgPath: './public/publicom-p-transparent.png'
     });
 
-    // Subir a WhatsApp
+    const useWA = Boolean(WA_TOKEN && WA_PHONE_ID && /^\d{8,15}$/.test(String(to||'')));
+    if (!useWA){
+      if (DELETE_AFTER_MS > 0) setTimeout(() => { try{ fs.unlinkSync(filePath); } catch {} }, DELETE_AFTER_MS).unref?.();
+      return filePath;
+    }
+
     const mediaId = await waUploadMediaFromFile(filePath, 'application/pdf');
     if (!mediaId) throw new Error('No se pudo subir el PDF a WhatsApp.');
 
-    // Enviar documento
     const caption = `Cotización - ${clienteName}`;
     const ok = await waSendDocument(to, mediaId, filename, caption);
     if (!ok) throw new Error('No se pudo enviar el PDF por WhatsApp.');
 
-    // Programar borrado del archivo local (sin memoria persistente)
-    if (DELETE_AFTER_MS > 0) {
-      setTimeout(() => { try { fs.unlinkSync(filePath); } catch {} }, DELETE_AFTER_MS).unref?.();
-    }
+    if (DELETE_AFTER_MS > 0) setTimeout(() => { try{ fs.unlinkSync(filePath); } catch {} }, DELETE_AFTER_MS).unref?.();
 
-    return {
-      ok: true,
-      mediaId,
-      path: filePath,
-      filename,
-      caption,
-      quoteId: quote?.id
-    };
+    return { ok:true, mediaId, path:filePath, filename, caption, quoteId:quote?.id };
   } finally {
     _release();
   }

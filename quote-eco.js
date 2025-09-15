@@ -1,11 +1,11 @@
-// quote-pdf.js — SUBTOTAL por fila tal cual, TOTAL = suma; números centrados; fix de on('error')
+// quote-eco.js — Igual al layout de Publicom + logo extra arriba del título “COTIZACIÓN”
 import fs from 'fs';
 import path from 'path';
 import PDFDocument from 'pdfkit';
 
 const TZ = process.env.TIMEZONE || 'America/La_Paz';
 
-// === util ===
+// === utils (mismos helpers del base) ===
 function findAsset(...relPaths){
   for (const r of relPaths){
     const p = path.resolve(r);
@@ -20,7 +20,6 @@ function money(n){
 }
 function upperES(s){ return String(s ?? '').toLocaleUpperCase('es-BO'); }
 
-// --- Fecha larga en español ---
 function parseDateFlexible(s) {
   if (!s) return new Date();
   const t = String(s).trim();
@@ -47,7 +46,8 @@ function fmtLongDateES(inputDate, tz = TZ){
   return upperES(s);
 }
 
-export async function renderQuotePDF(quote, outPath, company = {}){
+// === render principal (igual al base + logo extra arriba del título) ===
+async function renderEcoQuotePDF(quote, outPath){
   const dir = path.dirname(outPath);
   try{ fs.mkdirSync(dir, { recursive:true }); }catch{}
 
@@ -60,11 +60,12 @@ export async function renderQuotePDF(quote, outPath, company = {}){
   const xMargin = 36;
   const usableW = pageW - xMargin*2;
 
-  // Assets
-  const watermarkPath = company.bgPath || findAsset('./public/publicom-p-transparent.png');
-  const logoPath      = company.logoPath || findAsset('./public/publicom-logo.png');
+  // Assets: mantenemos watermark y logo de Publicom + añadimos el nuevo logo chico
+  const watermarkPath = findAsset('./public/publicom-p-transparent.png');
+  const logoPath      = findAsset('./public/publicom-logo.png');
+  const extraLogoPath = findAsset('./public/logo-c.png', './public\\logo-c.png', 'public/logo-c.png', 'public\\logo-c.png');
 
-  // Fondo (baja opacidad) — ligeramente más arriba
+  // Fondo (igual al base)
   const BG_Y_SHIFT = -50;
   if (watermarkPath){
     doc.save();
@@ -76,17 +77,23 @@ export async function renderQuotePDF(quote, outPath, company = {}){
     doc.restore();
   }
 
-  // Header
+  // Header: logo Publicom arriba a la derecha (igual al base)
   let y = 28;
-
   if (logoPath){
     try { doc.image(logoPath, pageW - xMargin - 120, y, { width: 120 }); } catch {}
   }
 
-  const TITLE_EXTRA = 24; // bajar el título
+  // ** NUEVO **: logo extra arriba del título, tamaño pequeño
+  if (extraLogoPath){
+    try { doc.image(extraLogoPath, xMargin, y, { width: 60 }); } catch {}
+  }
+
+  // Título (lo bajamos más para que no se superponga con el logo extra)
+  const TITLE_EXTRA = 72; // antes ~24; ahora más abajo para despejar el logo
   doc.font('Helvetica-Bold').fontSize(18).text('COTIZACIÓN', xMargin, y + TITLE_EXTRA, { align: 'left' });
 
-  y = 86 + 18;
+  // Continuamos como el base
+  y = 86 + 18 + (TITLE_EXTRA - 24); // ajustamos el “punto de partida” por el descenso extra
 
   // ===== BLOQUE DE DATOS =====
   const c = quote.cliente || {};
@@ -116,7 +123,7 @@ export async function renderQuotePDF(quote, outPath, company = {}){
      .text('“Para su consideración, remitimos la presente cotización con el detalle de los servicios solicitados.”', xMargin, y, { width: usableW });
   doc.fillColor('black');
 
-  // ===== TABLA (CANTIDAD | DESCRIPCIÓN | SUBTOTAL) =====
+  // ===== TABLA =====
   y = doc.y + 28;
 
   const cols = [
@@ -126,20 +133,18 @@ export async function renderQuotePDF(quote, outPath, company = {}){
   ];
   const tableX = xMargin;
   const tableW = cols.reduce((a,c)=>a+c.w,0);
-
   const headerH = 26;
+
   doc.save();
   doc.rect(tableX, y, tableW, headerH).fill('#f3f4f6');
   doc.fillColor('#111827').font('Helvetica-Bold').fontSize(10);
   {
     let cx = tableX + 10;
     for (const cdef of cols){
-      // títulos centrados
       doc.text(cdef.label, cx, y + (headerH-12)/2, { width: cdef.w-20, align: 'center' });
       cx += cdef.w;
     }
   }
-  // bordes encabezado
   {
     let tx = tableX;
     for (const cdef of cols){
@@ -154,6 +159,8 @@ export async function renderQuotePDF(quote, outPath, company = {}){
     if (y + need > (pageH - 64)){
       doc.addPage();
       y = 42;
+
+      // Repetimos watermark y logo Publicom (igual al base)
       if (watermarkPath){
         doc.save();
         doc.opacity(0.06);
@@ -166,7 +173,8 @@ export async function renderQuotePDF(quote, outPath, company = {}){
       if (logoPath){
         try { doc.image(logoPath, pageW - xMargin - 100, 28, { width: 100 }); } catch {}
       }
-      // repetir encabezado
+
+      // Encabezado de tabla
       doc.save();
       doc.rect(tableX, y, tableW, headerH).fill('#f3f4f6');
       doc.fillColor('#111827').font('Helvetica-Bold').fontSize(10);
@@ -187,7 +195,6 @@ export async function renderQuotePDF(quote, outPath, company = {}){
 
   const rowPadV = 8;
   const minRowH = 22;
-
   doc.fontSize(10).fillColor('black');
 
   let totalSumaBs  = 0;
@@ -198,13 +205,8 @@ export async function renderQuotePDF(quote, outPath, company = {}){
     const lineAmount = Number(itRaw.subtotal_bs || 0);
     totalSumaBs += lineAmount;
 
-    const cellTexts = [
-      isFinite(cant) ? String(cant) : '',
-      detalle,
-      money(lineAmount),
-    ];
+    const cellTexts = [ isFinite(cant) ? String(cant) : '', detalle, money(lineAmount) ];
 
-    // alto de fila (respeta alineación por columna)
     const cellHeights = [];
     for (let i=0; i<cols.length; i++){
       const w = cols[i].w - 20;
@@ -214,12 +216,12 @@ export async function renderQuotePDF(quote, outPath, company = {}){
     const rowH = Math.max(...cellHeights);
     ensureSpace(rowH + 10);
 
-    // zebra leve
+    // zebra
     doc.save();
     doc.rect(tableX, y, tableW, rowH).fillOpacity(0.04).fill('#6b7280').fillOpacity(1);
     doc.restore();
 
-    // celdas (bordes NEGROS) con alineación por columna
+    // celdas
     let tx = tableX;
     for (let i=0; i<cols.length; i++){
       const cdef = cols[i];
@@ -234,7 +236,7 @@ export async function renderQuotePDF(quote, outPath, company = {}){
     y += rowH;
   }
 
-  // TOTAL (centrado y con “Bs ”)
+  // TOTAL
   const totalBs = Number(quote.total_bs || totalSumaBs);
 
   ensureSpace(54);
@@ -257,4 +259,29 @@ export async function renderQuotePDF(quote, outPath, company = {}){
   doc.end();
   await new Promise((res, rej)=>{ stream.on('finish', res); stream.on('error', rej); });
   return outPath;
+}
+
+// ========= API para el bot =========
+export async function sendEcoRuralQuotePDF(userId, session){
+  const items = Array.isArray(session?.vars?.cart) ? session.vars.cart.map(it => ({
+    nombre:      String(it?.nombre ?? ''),
+    cantidad:    Number(it?.cantidad ?? 0),
+    subtotal_bs: Number(it?.subtotal_bs ?? 0)
+  })) : [];
+
+  const quote = {
+    cliente: { nombre: session?.profileName || '' },
+    items,
+    note: {
+      fecha:        session?.note?.fecha || null,
+      descripcion:  session?.note?.descripcion || ''
+    },
+    total_bs: Number(session?.note?.total_bob ?? 0)
+  };
+
+  const outDir = path.resolve('tmp/pdf');
+  try { fs.mkdirSync(outDir, { recursive:true }); } catch {}
+  const outPath = path.join(outDir, `eco-quote-${userId}-${Date.now()}.pdf`);
+
+  return renderEcoQuotePDF(quote, outPath);
 }

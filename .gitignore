@@ -1,23 +1,8 @@
-# deps/cache
-node_modules/
-npm-debug.log*
-yarn.lock
-package-lock.json
-
-# env
+﻿node_modules
 .env
-*.env
-!.env.example
-
-# editor/OS
+tmp
+data
+*.log
+*.local
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# build
-dist/
-build/
-
-/secrets/
-/*.json
+secrets/
